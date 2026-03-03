@@ -1,0 +1,184 @@
+################################################################################
+# SWIFTTRACK - Docker Compose Configuration
+################################################################################
+#
+# PURPOSE:
+# Defines all infrastructure services needed for the SwiftTrack platform.
+# This file sets up the development environment with a single command.
+#
+# USAGE:
+#   docker-compose up -d       # Start all services in background
+#   docker-compose down        # Stop all services
+#   docker-compose logs -f     # View logs
+#
+# SERVICES:
+#   - RabbitMQ: Message broker for microservices communication
+#   - MongoDB: Database for orders and saga state
+#
+# NETWORK:
+# All services are on the 'swifttrack-network' allowing them to communicate
+# using service names (e.g., 'rabbitmq' instead of 'localhost')
+#
+# NOTE FOR TEAM:
+# This setup is for development only. In production, use managed services
+# or Kubernetes for proper scaling and high availability.
+#
+################################################################################
+
+services:
+  #=============================================================================
+  # RABBITMQ - Message Broker
+  #=============================================================================
+  #
+  # WHY RABBITMQ?
+  # - Handles high-volume messaging (Black Friday requirement)
+  # - Supports multiple messaging patterns (pub/sub, request/reply)
+  # - Message persistence ensures "orders never lost"
+  # - Built-in management UI for monitoring
+  #
+  # PORTS:
+  # - 5672: AMQP protocol (application connections)
+  # - 15672: Management UI (http://localhost:15672, guest/guest)
+  #
+  # QUEUES CREATED (automatically by applications):
+  # - orders_queue: API Gateway -> Order Service
+  # - cms_queue: Order Service -> CMS Mock
+  # - wms_queue: Order Service -> WMS Mock
+  # - ros_queue: Order Service -> ROS Mock
+  # - notifications_queue: Order Service -> API Gateway (status updates)
+  #
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: swift-rabbit
+    hostname: swift-rabbit
+    ports:
+      - "6000:5672" # AMQP protocol (Mapped to 6000 to avoid Windows TCP port exclusions)
+      - "16000:15672" # Management UI (Mapped to 16000)
+    environment:
+      # Default credentials (change in production!)
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      # Persist queue data across restarts
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - swifttrack-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  #=============================================================================
+  # MONGODB - Database
+  #=============================================================================
+  #
+  # WHY MONGODB?
+  # - Flexible schema for evolving data structures
+  # - Native JSON storage (no ORM mapping needed)
+  # - Good for complex nested documents (orders with items, addresses)
+  # - Easy horizontal scaling for high volume
+  #
+  # PORT: 27017
+  #
+  # DATABASES:
+  # - swifttrack: Main database
+  #   - orders: Order documents (API Gateway)
+  #   - order_sagas: Saga state (Order Service)
+  #
+  # CONNECTION STRING: mongodb://localhost:27017/swifttrack
+  #
+  mongodb:
+    image: mongo:latest
+    container_name: swift-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      # Persist database data across restarts
+      - mongodb_data:/data/db
+    networks:
+      - swifttrack-network
+
+  #=============================================================================
+  # API GATEWAY
+  #=============================================================================
+  api-gateway:
+    build: ./api-gateway
+    container_name: swift-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017/swifttrack
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    networks:
+      - swifttrack-network
+
+  #=============================================================================
+  # ORDER SERVICE
+  #=============================================================================
+  order-service:
+    build: ./order-service
+    container_name: swift-order-service
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017/swifttrack
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    networks:
+      - swifttrack-network
+
+  #=============================================================================
+  # LEGACY MOCKS (CMS/WMS/ROS)
+  #=============================================================================
+  legacy-mock:
+    build: ./legacy-cms
+    container_name: swift-legacy-mock
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - swifttrack-network
+
+  #=============================================================================
+  # FRONTEND (Next.js)
+  #=============================================================================
+  client:
+    build: ./client
+    container_name: swift-client
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - swifttrack-network
+
+#===============================================================================
+# VOLUMES
+#===============================================================================
+# Named volumes persist data across container restarts
+#
+volumes:
+  rabbitmq_data:
+    name: swifttrack-rabbitmq-data
+  mongodb_data:
+    name: swifttrack-mongodb-data
+
+#===============================================================================
+# NETWORKS
+#===============================================================================
+# Custom network for service discovery
+#
+networks:
+  swifttrack-network:
+    name: swifttrack-network
+    driver: bridge
