@@ -51,30 +51,13 @@ export default function ClientDashboard() {
         <StatCard label="Delivered" value={stats.delivered} />
       </div>
 
-      {/* Actions bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex gap-2">
-          {["ALL", "PROCESSING", "IN_TRANSIT", "DELIVERED", "FAILED"].map(
-            (f) => (
-              <button
-                key={f}
-                onClick={() => setFilterStatus(f)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
-                  filterStatus === f
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                {f === "ALL" ? "All" : f === "IN_TRANSIT" ? "In Transit" : f.charAt(0) + f.slice(1).toLowerCase()}
-              </button>
-            )
-          )}
-        </div>
+        <div className="flex gap-2"></div>
 
         <div className="flex gap-2">
           <button
             onClick={refetch}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 cursor-pointer"
           >
             <RefreshCw className="w-4 h-4" />
             Refresh

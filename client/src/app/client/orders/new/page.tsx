@@ -1,14 +1,3 @@
-/**
- * =============================================================================
- * CREATE NEW ORDER PAGE
- * =============================================================================
- *
- * Form for clients to submit a new order.
- * Sends a POST request to the API Gateway which then pushes
- * the order into RabbitMQ for Saga processing.
- * =============================================================================
- */
-
 "use client";
 
 import { useState } from "react";

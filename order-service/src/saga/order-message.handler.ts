@@ -19,7 +19,13 @@
  */
 
 import { Controller, Logger } from '@nestjs/common';
-import { EventPattern, MessagePattern, Payload } from '@nestjs/microservices';
+import {
+  EventPattern,
+  MessagePattern,
+  Payload,
+  Ctx,
+  RmqContext,
+} from '@nestjs/microservices';
 import { SagaOrchestratorService } from './saga-orchestrator.service';
 
 @Controller()
@@ -27,6 +33,37 @@ export class OrderMessageHandler {
   private readonly logger = new Logger(OrderMessageHandler.name);
 
   constructor(private readonly sagaOrchestrator: SagaOrchestratorService) {}
+
+  /**
+   * MANUAL ACKNOWLEDGEMENT
+   * ======================
+   *
+   * This service connects with `noAck: false` (see main.ts) so that a message
+   * is only removed from RabbitMQ once we have finished with it - if the
+   * process dies mid-saga, the broker redelivers the order instead of losing
+   * it. NestJS does NOT auto-ack in that mode, so every handler must ack
+   * itself. Without this, unacked messages accumulate until they hit
+   * `prefetchCount` and the consumer stops receiving orders entirely.
+   *
+   * We ack in a `finally` rather than only on success: the saga orchestrator
+   * records its own failures and runs compensation, so a thrown error is
+   * already handled business state, not something a redelivery would fix.
+   * Requeuing here would just replay the same failing order forever.
+   */
+  private ack(context: RmqContext): void {
+    if (!context) return;
+
+    try {
+      const channel = context.getChannelRef();
+      const message = context.getMessage();
+
+      if (channel && message) {
+        channel.ack(message);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to ack message: ${error.message}`);
+    }
+  }
 
   /**
    * ORDER CREATED EVENT HANDLER
@@ -76,6 +113,7 @@ export class OrderMessageHandler {
         longitude?: number;
       };
     },
+    @Ctx() context: RmqContext,
   ): Promise<void> {
     this.logger.log(`Received order_created event for order: ${data.orderId}`);
     this.logger.debug(`Order data: ${JSON.stringify(data)}`);
@@ -89,6 +127,8 @@ export class OrderMessageHandler {
       );
       // The saga orchestrator handles its own error recovery
       // This catch is just for unexpected errors
+    } finally {
+      this.ack(context);
     }
   }
 
@@ -106,6 +146,7 @@ export class OrderMessageHandler {
   @MessagePattern('retry_order_saga')
   async handleRetryOrder(
     @Payload() data: { orderId: string },
+    @Ctx() context: RmqContext,
   ): Promise<{ success: boolean; message: string }> {
     this.logger.log(`Received retry request for order: ${data.orderId}`);
 
@@ -124,6 +165,8 @@ export class OrderMessageHandler {
         success: false,
         message: `Failed to retry: ${error.message}`,
       };
+    } finally {
+      this.ack(context);
     }
   }
 }

@@ -1,8 +1,10 @@
+import { RmqContext } from '@nestjs/microservices';
 import { SagaOrchestratorService } from './saga-orchestrator.service';
 export declare class OrderMessageHandler {
     private readonly sagaOrchestrator;
     private readonly logger;
     constructor(sagaOrchestrator: SagaOrchestratorService);
+    private ack;
     handleOrderCreated(data: {
         orderId: string;
         customerId: string;
@@ -23,10 +25,10 @@ export declare class OrderMessageHandler {
             latitude?: number;
             longitude?: number;
         };
-    }): Promise<void>;
+    }, context: RmqContext): Promise<void>;
     handleRetryOrder(data: {
         orderId: string;
-    }): Promise<{
+    }, context: RmqContext): Promise<{
         success: boolean;
         message: string;
     }>;

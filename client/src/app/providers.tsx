@@ -1,7 +1,3 @@
-/**
- * Providers - Wraps the app with client-side providers (Toaster for notifications)
- */
-
 "use client";
 
 import { Toaster } from "react-hot-toast";

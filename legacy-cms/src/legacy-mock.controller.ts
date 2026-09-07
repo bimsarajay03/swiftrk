@@ -12,24 +12,53 @@
  */
 
 import { Controller, Logger } from '@nestjs/common';
-import { MessagePattern, Payload } from '@nestjs/microservices';
+import { MessagePattern, Payload, Ctx, RmqContext } from '@nestjs/microservices';
 
 @Controller()
 export class LegacyMockController {
   private readonly logger = new Logger(LegacyMockController.name);
+
+  /**
+   * MANUAL ACKNOWLEDGEMENT
+   * ======================
+   *
+   * These mocks connect with `noAck: false` (see main.ts) so a message is only
+   * dropped from the queue once the mock has handled it. NestJS does not
+   * auto-ack in that mode, so unacked messages would otherwise pile up on
+   * cms_queue / wms_queue / ros_queue for the lifetime of the process.
+   */
+  private ack(context: RmqContext): void {
+    if (!context) return;
+
+    try {
+      const channel = context.getChannelRef();
+      const message = context.getMessage();
+
+      if (channel && message) {
+        channel.ack(message);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to ack message: ${error.message}`);
+    }
+  }
 
   // =========================================================================
   // CMS - Client Management System (SOAP/XML mock)
   // =========================================================================
 
   @MessagePattern('cms_create_order')
-  handleCmsCreateOrder(@Payload() data: any) {
+  handleCmsCreateOrder(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[CMS] Creating order: ${data.orderId}`);
 
     // Simulate SOAP/XML processing delay
     const cmsOrderId = `CMS-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
     this.logger.log(`[CMS] Order created successfully: ${cmsOrderId}`);
+
+    this.ack(context);
 
     return {
       success: true,
@@ -39,8 +68,13 @@ export class LegacyMockController {
   }
 
   @MessagePattern('cms_cancel_order')
-  handleCmsCancelOrder(@Payload() data: any) {
+  handleCmsCancelOrder(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[CMS] Cancelling order: ${data.orderId} (CMS ID: ${data.cmsOrderId})`);
+
+    this.ack(context);
 
     return {
       success: true,
@@ -53,7 +87,10 @@ export class LegacyMockController {
   // =========================================================================
 
   @MessagePattern('wms_check_stock')
-  handleWmsCheckStock(@Payload() data: any) {
+  handleWmsCheckStock(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[WMS] Checking stock for order: ${data.orderId}`);
 
     // Simulate stock check - 90% chance of in-stock for demo
@@ -68,6 +105,8 @@ export class LegacyMockController {
       this.logger.warn(`[WMS] Out of stock for order: ${data.orderId}`);
     }
 
+    this.ack(context);
+
     return {
       success: inStock,
       inStock,
@@ -78,8 +117,13 @@ export class LegacyMockController {
   }
 
   @MessagePattern('wms_reserve_stock')
-  handleWmsReserveStock(@Payload() data: any) {
+  handleWmsReserveStock(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[WMS] Reserving stock for order: ${data.orderId}`);
+
+    this.ack(context);
 
     return {
       success: true,
@@ -88,8 +132,13 @@ export class LegacyMockController {
   }
 
   @MessagePattern('wms_release_stock')
-  handleWmsReleaseStock(@Payload() data: any) {
+  handleWmsReleaseStock(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[WMS] Releasing stock for order: ${data.orderId} (Package: ${data.wmsPackageId})`);
+
+    this.ack(context);
 
     return {
       success: true,
@@ -102,7 +151,10 @@ export class LegacyMockController {
   // =========================================================================
 
   @MessagePattern('ros_optimize_route')
-  handleRosOptimizeRoute(@Payload() data: any) {
+  handleRosOptimizeRoute(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[ROS] Optimizing route for order: ${data.orderId}`);
 
     const rosRouteId = `ROUTE-${Math.floor(Math.random() * 1000)}`;
@@ -111,6 +163,8 @@ export class LegacyMockController {
     ).toISOString();
 
     this.logger.log(`[ROS] Route optimized: ${rosRouteId}, ETA: ${estimatedDeliveryTime}`);
+
+    this.ack(context);
 
     return {
       success: true,
@@ -137,8 +191,13 @@ export class LegacyMockController {
   }
 
   @MessagePattern('ros_cancel_route')
-  handleRosCancelRoute(@Payload() data: any) {
+  handleRosCancelRoute(
+    @Payload() data: any,
+    @Ctx() context: RmqContext,
+  ) {
     this.logger.log(`[ROS] Cancelling route: ${data.rosRouteId} for order: ${data.orderId}`);
+
+    this.ack(context);
 
     return {
       success: true,

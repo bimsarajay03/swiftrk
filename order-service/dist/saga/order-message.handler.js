@@ -23,7 +23,21 @@ let OrderMessageHandler = OrderMessageHandler_1 = class OrderMessageHandler {
     constructor(sagaOrchestrator) {
         this.sagaOrchestrator = sagaOrchestrator;
     }
-    async handleOrderCreated(data) {
+    ack(context) {
+        if (!context)
+            return;
+        try {
+            const channel = context.getChannelRef();
+            const message = context.getMessage();
+            if (channel && message) {
+                channel.ack(message);
+            }
+        }
+        catch (error) {
+            this.logger.error(`Failed to ack message: ${error.message}`);
+        }
+    }
+    async handleOrderCreated(data, context) {
         this.logger.log(`Received order_created event for order: ${data.orderId}`);
         this.logger.debug(`Order data: ${JSON.stringify(data)}`);
         try {
@@ -32,8 +46,11 @@ let OrderMessageHandler = OrderMessageHandler_1 = class OrderMessageHandler {
         catch (error) {
             this.logger.error(`Failed to process order ${data.orderId}: ${error.message}`);
         }
+        finally {
+            this.ack(context);
+        }
     }
-    async handleRetryOrder(data) {
+    async handleRetryOrder(data, context) {
         this.logger.log(`Received retry request for order: ${data.orderId}`);
         try {
             return {
@@ -47,21 +64,26 @@ let OrderMessageHandler = OrderMessageHandler_1 = class OrderMessageHandler {
                 message: `Failed to retry: ${error.message}`,
             };
         }
+        finally {
+            this.ack(context);
+        }
     }
 };
 exports.OrderMessageHandler = OrderMessageHandler;
 __decorate([
     (0, microservices_1.EventPattern)('order_created'),
     __param(0, (0, microservices_1.Payload)()),
+    __param(1, (0, microservices_1.Ctx)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [Object, microservices_1.RmqContext]),
     __metadata("design:returntype", Promise)
 ], OrderMessageHandler.prototype, "handleOrderCreated", null);
 __decorate([
     (0, microservices_1.MessagePattern)('retry_order_saga'),
     __param(0, (0, microservices_1.Payload)()),
+    __param(1, (0, microservices_1.Ctx)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [Object, microservices_1.RmqContext]),
     __metadata("design:returntype", Promise)
 ], OrderMessageHandler.prototype, "handleRetryOrder", null);
 exports.OrderMessageHandler = OrderMessageHandler = OrderMessageHandler_1 = __decorate([

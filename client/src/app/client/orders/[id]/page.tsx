@@ -1,18 +1,3 @@
-/**
- * =============================================================================
- * ORDER DETAIL PAGE - Real-Time Order Tracking
- * =============================================================================
- *
- * Shows full order detail with:
- * - Current status badge
- * - Saga timeline (step-by-step processing progress)
- * - Order items & delivery address
- * - Delivery proof when delivered
- *
- * Updates in REAL-TIME via Socket.io.
- * =============================================================================
- */
-
 "use client";
 
 import { useEffect, useState } from "react";

@@ -75,7 +75,7 @@ export default function DriverDashboard() {
         </div>
         <button
           onClick={refetch}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 cursor-pointer"
         >
           <RefreshCw className="w-4 h-4" />
           Refresh
@@ -110,11 +110,7 @@ export default function DriverDashboard() {
             <Link key={order.id} href={`/driver/deliveries/${order.id}`} className="block">
               <div className="bg-white rounded-xl border border-gray-200 p-4 hover:border-emerald-300 transition-all cursor-pointer">
                 <div className="flex items-start justify-between">
-                  <div className="flex items-start gap-3">
-                    {/* Sequence number */}
-                    <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-sm font-bold shrink-0">
-                      {i + 1}
-                    </div>
+                  <div className="flex items-start gap-3">                   
                     <div>
                       <p className="font-semibold text-gray-900">
                         {order.id}
