@@ -17,7 +17,10 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "start:systems": "ts-node src/systems/main.ts",
+    "start:systems:prod": "node dist/systems/main",
+    "wms:probe": "ts-node src/scripts/wms-probe.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -26,6 +29,8 @@
     "@nestjs/platform-express": "^11.0.1",
     "amqp-connection-manager": "^5.0.0",
     "amqplib": "^0.10.4",
+    "express": "^5.3.0",
+    "fast-xml-parser": "^5.11.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

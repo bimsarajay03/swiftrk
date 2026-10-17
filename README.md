@@ -5,7 +5,7 @@ SwiftTrack sits between a customer-facing portal / driver app and three legacy b
 systems that were never designed to talk to each other, and makes a single order flow
 cleanly across all of them.
 
-Built for the UCSC **Middleware Architecture (SCS2314)** assignment — see [guidelines.md](guidelines.md)
+Built for the UCSC **Middleware Architecture (SCS2314)** assignment — see [docs/guidelines.md](docs/guidelines.md)
 for the original brief.
 
 ---
@@ -80,9 +80,14 @@ architecture here exists to answer each one:
         └───┬──────┬─────┬───┘
             │      │     │  request/response over RMQ
             ▼      ▼     ▼
+        ┌────────────────────┐
+        │  LEGACY ADAPTERS   │           legacy-cms/ (3 RMQ consumers)
+        └───┬──────┬─────┬───┘           JSON → native protocol → JSON
+       SOAP │  TCP │     │ REST
+            ▼      ▼     ▼
         ┌──────┬──────┬──────┐
-        │ CMS  │ WMS  │ ROS  │           Legacy mocks (legacy-cms/)
-        │ SOAP │ TCP  │ REST │           3 consumers in 1 process
+        │ CMS  │ WMS  │ ROS  │           Legacy system simulators
+        │:8081 │:9100 │:8082 │           (legacy-cms/src/systems)
         └──────┴──────┴──────┘
 ```
 
@@ -143,8 +148,9 @@ Order statuses visible to the customer are defined in [shared/interfaces.ts](sha
 `WMS_OUT_OF_STOCK`, `ROS_PROCESSING`, `ROS_CONFIRMED`, `ASSIGNED`, `IN_TRANSIT`,
 `DELIVERED`, `FAILED`, `CANCELLED`.
 
-> The WMS mock fails ~10% of stock checks at random. That's deliberate — submit a handful of
-> orders and you'll see a real compensation run end-to-end in the timeline UI.
+> The WMS simulator fails ~10% of stock checks at random, and always fails a line with
+> quantity ≥ 100. That's deliberate — order 100 of something and you'll see a real
+> compensation run end-to-end in the timeline UI.
 
 ---
 
@@ -158,8 +164,8 @@ Order statuses visible to the customer are defined in [shared/interfaces.ts](sha
 docker-compose up -d --build
 ```
 
-Brings up RabbitMQ, MongoDB, the gateway, the order service, the legacy mocks and the
-frontend. Open <http://localhost:3001>.
+Brings up RabbitMQ, MongoDB, the gateway, the order service, the legacy adapters, the
+legacy system simulators and the frontend. Open <http://localhost:3001>.
 
 ### Option B — infra in Docker, services locally (better for development)
 
@@ -171,11 +177,12 @@ docker-compose up -d rabbitmq mongodb
 for d in api-gateway order-service legacy-cms client; do (cd "$d" && npm install); done
 ```
 
-Then run each service in its own terminal — **start the mocks first**, so the orchestrator's
-request-response calls have someone to answer them:
+Then run each service in its own terminal — **start the legacy systems and adapters first**,
+so the orchestrator's request-response calls have someone to answer them:
 
 ```bash
-cd legacy-cms    && npm run start:dev   # CMS + WMS + ROS consumers
+cd legacy-cms    && npm run start:systems  # CMS SOAP :8081, WMS TCP :9100, ROS REST :8082
+cd legacy-cms    && npm run start:dev   # adapters: cms/wms/ros_queue → native protocols
 cd order-service && npm run start:dev   # saga orchestrator
 cd api-gateway   && npm run start:dev   # REST + WebSocket    → :3000
 cd client        && npm run dev         # Next.js portal      → :3001
@@ -190,6 +197,9 @@ cd client        && npm run dev         # Next.js portal      → :3001
 | RabbitMQ management UI | <http://localhost:16000> (`guest` / `guest`) |
 | RabbitMQ AMQP | `localhost:6000` |
 | MongoDB | `mongodb://localhost:27017/swifttrack` |
+| CMS simulator (SOAP) | <http://localhost:8081/cms/soap> |
+| WMS simulator (TCP frames) | `localhost:9100` |
+| ROS simulator (REST) | <http://localhost:8082/api/v1> (`X-API-Key: dev-ros-key`) |
 
 > AMQP is mapped to **6000** (not the usual 5672) and the management UI to **16000**, to dodge
 > reserved-port conflicts on Windows. Inside the Docker network, services still connect to
@@ -273,8 +283,10 @@ order-service/   NestJS microservice — the orchestrator
     order-message.handler.ts       consumes order_created from orders_queue
     schemas/order-saga.schema.ts   saga state machine document
 
-legacy-cms/      Three RMQ consumers (cms_queue, wms_queue, ros_queue) mocking
-                 the SOAP, TCP and REST legacy systems in one process
+legacy-cms/      Legacy integration (see docs/setup.txt §4)
+  src/adapters/      RMQ consumers translating JSON ↔ SOAP / TCP frames / REST
+  src/protocols/     SOAP envelope codec, WMS frame codec
+  src/systems/       CMS, WMS and ROS simulators (own container: legacy-systems)
 
 client/          Next.js 16 + React 19 + Tailwind 4
   src/app/client/    portal: dashboard, new order, order detail + timeline
@@ -284,8 +296,13 @@ client/          Next.js 16 + React 19 + Tailwind 4
 
 shared/interfaces.ts   Single source of truth for order types, message patterns,
                        queue names and socket event names across all services
-docs/                  Detailed orchestrator documentation
-guidelines.md          Original assignment brief and scenario
+docs/                  All project documentation:
+  setup.txt              how to run everything, ports, legacy protocols
+  system.md              full system description and design choices
+  diagram.md             Mermaid diagrams (context, sequences, states)
+  guidelines.md          original assignment brief and scenario
+  mock-implementation.md plan for the SOAP / TCP / REST legacy adapters
+  MEMBER1_DOCUMENTATION.md  orchestrator documentation
 ```
 
 ### Message patterns & queues
@@ -298,9 +315,9 @@ Defined once in [shared/interfaces.ts](shared/interfaces.ts) as `MESSAGE_PATTERN
 | Queue | Consumer | Carries |
 | --- | --- | --- |
 | `orders_queue` | Order Service | `order_created` from the gateway |
-| `cms_queue` | CMS mock | create / cancel order |
-| `wms_queue` | WMS mock | check / reserve / release stock |
-| `ros_queue` | ROS mock | optimise / cancel route |
+| `cms_queue` | CMS adapter (SOAP) | create / cancel order |
+| `wms_queue` | WMS adapter (TCP) | check / reserve / release stock |
+| `ros_queue` | ROS adapter (REST) | optimise / cancel route |
 | `notifications_queue` | API Gateway | `order_status_updated`, `delivery_completed`, `saga_compensation_triggered`, `driver_assigned` |
 
 ---
@@ -337,10 +354,11 @@ actually pinned in the `package.json` files.
 `@nestjs/mongoose` + `mongoose` for the `order_sagas` collection. No HTTP server —
 it is a pure RabbitMQ microservice created with `NestFactory.createMicroservice`.
 
-### Legacy mocks
+### Legacy adapters and systems
 
-Only the core Nest packages and the RMQ transport. No database — the mocks are stateless and
-generate their IDs on the fly.
+The core Nest packages and the RMQ transport, plus `fast-xml-parser` (SOAP envelopes) and
+`express` (the CMS and ROS simulators). TCP uses Node's `net` module and HTTP calls use the
+built-in `fetch`. No database — the simulators keep their state in memory.
 
 ### Frontend (`client/`)
 
@@ -383,13 +401,12 @@ This is a prototype for an architecture assignment, and a few things are deliber
 - **No authentication.** The portal uses a hardcoded `CUST-001` and the driver app `DRV-001`.
   CORS is wide open and RabbitMQ uses default `guest` credentials. Production would need JWTs
   on both REST and WebSocket handshakes, TLS everywhere, and real broker credentials.
-- **The legacy systems are mocks.** They speak RabbitMQ rather than actual SOAP, TCP and REST;
-  the protocol translation is architecturally described but the adapters short-circuit to the
-  broker. WMS stock availability is randomised.
+- **The legacy systems are simulators.** The adapters really speak SOAP/XML, framed TCP and
+  REST to them, but the systems themselves are small in-memory stand-ins (state is lost on
+  restart) and WMS stock availability is randomised.
 - **Driver assignment is hardcoded** to `DRV-001` once ROS confirms a route.
 - **Compensation is best-effort.** If a compensating call itself fails it is logged, not retried
   — a production system would need a dead-letter queue and a retry policy.
-- `middleware/` is an empty placeholder.
 
 ## Troubleshooting
 
@@ -400,8 +417,10 @@ docker-compose logs -f         # infra logs
 
 - **Orders stay `PENDING`** — the order service isn't consuming `orders_queue`. Check it's
   running and connected to `amqp://localhost:6000`.
-- **Stuck at `CMS_PROCESSING`** — the legacy mocks aren't running; the orchestrator will time
-  out after 30s and compensate.
+- **Stuck at `CMS_PROCESSING`** — the legacy adapters aren't running; the orchestrator will
+  time out after 30s and compensate.
+- **Orders fail with `CMS_UNAVAILABLE` / `WMS_UNAVAILABLE` / `ROS_UNAVAILABLE`** — the adapters
+  are running but the legacy systems aren't (`npm run start:systems`).
 - **No live updates** — the gateway must start its microservice consumers *and* its HTTP
   server (it's a hybrid app); confirm `RabbitMQ consumer listening on notifications_queue`
   appears in its startup logs.

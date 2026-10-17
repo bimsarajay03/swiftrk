@@ -136,16 +136,53 @@ services:
       - swifttrack-network
 
   #=============================================================================
-  # LEGACY MOCKS (CMS/WMS/ROS)
+  # LEGACY SYSTEMS (simulated CMS/WMS/ROS, native protocols)
   #=============================================================================
+  #
+  # Stand-ins for the three back-office systems. They know nothing about
+  # RabbitMQ; the legacy-mock adapters below call them over the network.
+  #
+  # PORTS (published so they can be probed from the host with curl / wms:probe):
+  # - 8081: CMS  SOAP 1.1 over HTTP   POST /cms/soap
+  # - 9100: WMS  proprietary length-prefixed TCP frames
+  # - 8082: ROS  REST/JSON            /api/v1/routes (X-API-Key)
+  #
+  legacy-systems:
+    build: ./legacy-cms
+    container_name: swift-legacy-systems
+    command: ["node", "dist/systems/main"]
+    ports:
+      - "8081:8081"
+      - "9100:9100"
+      - "8082:8082"
+    environment:
+      - ROS_API_KEY=dev-ros-key
+      - WMS_OOS_RATE=0.1
+    networks:
+      - swifttrack-network
+
+  #=============================================================================
+  # LEGACY ADAPTERS (CMS/WMS/ROS)
+  #=============================================================================
+  #
+  # Consume cms_queue / wms_queue / ros_queue, translate the canonical JSON to
+  # SOAP / TCP frames / REST, call legacy-systems, and reply over RabbitMQ.
+  #
   legacy-mock:
     build: ./legacy-cms
     container_name: swift-legacy-mock
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - CMS_SOAP_URL=http://legacy-systems:8081/cms/soap
+      - WMS_TCP_HOST=legacy-systems
+      - WMS_TCP_PORT=9100
+      - ROS_BASE_URL=http://legacy-systems:8082
+      - ROS_API_KEY=dev-ros-key
     depends_on:
       rabbitmq:
         condition: service_healthy
+      legacy-systems:
+        condition: service_started
     networks:
       - swifttrack-network
 

@@ -1,0 +1,203 @@
+================================================================================
+HOW TO RUN THE FULL SYSTEM
+================================================================================
+
+1. QUICK START (local development)
+--------------------------------------------------------------------------------
+1. Start Infrastructure (RabbitMQ & MongoDB only):
+   docker-compose up -d rabbitmq mongodb
+
+   (Plain `docker-compose up -d` starts EVERY service in containers - see
+   section 2. Don't mix the two: the containerised adapters would compete
+   with your local ones for the same queues.)
+
+2. Install Dependencies (in each service folder):
+   cd api-gateway && npm install
+   cd order-service && npm install
+   cd legacy-cms && npm install
+   cd client && npm install
+
+3. Start Legacy Systems - simulated CMS / WMS / ROS (Terminal 1):
+   cd legacy-cms
+   npm run start:systems
+   (CMS SOAP on :8081, WMS TCP on :9100, ROS REST on :8082)
+
+4. Start Legacy Adapters (Terminal 2):
+   cd legacy-cms
+   npm run start:dev
+   (Consume cms_queue / wms_queue / ros_queue and call the systems above)
+
+5. Start Order Service (Terminal 3):
+   cd order-service
+   npm run start:dev
+
+6. Start API Gateway (Terminal 4):
+   cd api-gateway
+   npm run start:dev
+   (Runs on http://localhost:3000)
+
+7. Start Frontend (Terminal 5):
+   cd client
+   npm run dev
+   (Runs on http://localhost:3001)
+
+Start order matters: systems -> adapters -> order service. If the adapters
+start first they still work - the WMS adapter reconnects on its own and the
+HTTP adapters connect per request - but calls fail until the systems are up.
+
+
+2. RUN EVERYTHING IN DOCKER
+--------------------------------------------------------------------------------
+   docker-compose up -d --build
+
+Starts rabbitmq, mongodb, legacy-systems, legacy-mock (adapters),
+order-service, api-gateway and client. Watch the protocol traffic with:
+
+   docker-compose logs -f legacy-mock legacy-systems
+
+
+3. PORTS
+--------------------------------------------------------------------------------
+- RabbitMQ AMQP: localhost:6000 (mapped from container 5672)
+- RabbitMQ Management UI: localhost:16000
+- MongoDB: localhost:27017
+- API Gateway (REST + WebSocket): localhost:3000
+- Frontend (Next.js): localhost:3001
+- CMS (SOAP 1.1 over HTTP): localhost:8081  POST /cms/soap
+- WMS (length-prefixed TCP frames): localhost:9100
+- ROS (REST/JSON, X-API-Key): localhost:8082  /api/v1/routes
+
+
+4. LEGACY PROTOCOLS
+--------------------------------------------------------------------------------
+The saga still talks JSON over RabbitMQ. The adapters in legacy-cms/src/adapters
+translate each command into the legacy system's own protocol:
+
+  CMS  cms_create_order / cms_cancel_order
+       -> SOAP envelope, POST /cms/soap, SOAPAction urn:swifttrack:cms#CreateOrder
+       <- XML response, or a soapenv:Fault (HTTP 500) with <cms:ErrorCode>
+
+  WMS  wms_check_stock / wms_reserve_stock / wms_release_stock
+       -> [u32 length][CHK|seq|orderId|sku:qty,...]   (also RSV, REL, PNG)
+       <- [u32 length][ACK|seq|OK|pkgId] or [NAK|seq|OUT_OF_STOCK|sku]
+
+  ROS  ros_optimize_route / ros_cancel_route
+       -> POST /api/v1/routes, DELETE /api/v1/routes/:routeId, header X-API-Key
+       <- 201 JSON route / 204 / 404 / 401
+
+Try them by hand (with the systems running):
+
+  # CMS: SOAP fault for an unknown order
+  curl -X POST localhost:8081/cms/soap \
+    -H 'Content-Type: text/xml' \
+    -H 'SOAPAction: "urn:swifttrack:cms#CancelOrder"' \
+    --data '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:cms="urn:swifttrack:cms"><soapenv:Body><cms:CancelOrderRequest><cms:CmsOrderId>nope</cms:CmsOrderId></cms:CancelOrderRequest></soapenv:Body></soapenv:Envelope>'
+
+  # WMS: send one framed request (binary header, so not nc-friendly)
+  cd legacy-cms
+  npm run wms:probe -- CHK ORD-123 PROD-001:2
+  npm run wms:probe -- REL ORD-123 WMS-PKG-42
+  npm run wms:probe -- PNG
+
+  # ROS
+  curl localhost:8082/health
+  curl -X POST localhost:8082/api/v1/routes -H 'X-API-Key: dev-ros-key' \
+    -H 'Content-Type: application/json' \
+    -d '{"reference":"ORD-1","origin":{"lat":6.9271,"lng":79.8612,"label":"Warehouse"},"destination":{"lat":6.93,"lng":79.87,"label":"Colombo"},"parcelCount":1}'
+
+Demo scenarios:
+- Out of stock + compensation: order any item with quantity >= 100. WMS
+  always answers NAK OUT_OF_STOCK, then the saga sends a SOAP CancelOrder.
+  (Other orders also fail ~10% of the time at random; set WMS_OOS_RATE=0 to
+  turn that off.)
+- Legacy outage: stop the systems (Ctrl+C in Terminal 1, or
+  `docker stop swift-legacy-systems`) and place an order. The CMS step fails
+  with CMS_UNAVAILABLE within 10 s and the order goes to FAILED.
+- WMS reconnect: restart the systems while the adapters run; the adapter logs
+  "Reconnecting to WMS in ... ms" and the next order succeeds.
+
+
+5. LEGACY ENVIRONMENT VARIABLES (legacy-cms)
+--------------------------------------------------------------------------------
+Adapters (npm run start:dev / container legacy-mock):
+- CMS_SOAP_URL         default http://localhost:8081/cms/soap
+- WMS_TCP_HOST         default localhost
+- WMS_TCP_PORT         default 9100
+- ROS_BASE_URL         default http://localhost:8082
+- ROS_API_KEY          default dev-ros-key   (must match the systems)
+- ADAPTER_TIMEOUT_MS   default 10000         (below the saga's 30 s timeout)
+
+Systems (npm run start:systems / container legacy-systems):
+- CMS_PORT / WMS_PORT / ROS_PORT   defaults 8081 / 9100 / 8082
+- ROS_API_KEY          default dev-ros-key
+- WMS_OOS_RATE         default 0.1   (random out-of-stock probability)
+- ROS_LATENCY_MS       default 0     (artificial ROS delay, to watch the saga)
+
+
+6. REST API ENDPOINTS
+--------------------------------------------------------------------------------
+BASE URL: http://localhost:3000
+
+- Create Order:        POST   /orders
+- List All Orders:     GET    /orders
+- Get Order by ID:     GET    /orders/:id
+- Customer Orders:     GET    /orders/customer/:customerId
+- Driver Orders:       GET    /orders/driver/:driverId
+- Update Delivery:     PATCH  /orders/:id/delivery
+
+
+7. WEBSOCKET (Socket.io)
+--------------------------------------------------------------------------------
+URL: http://localhost:3000
+
+Subscribe:  socket.emit('order:subscribe', { customerId: 'CUST-001' });
+Listen:     socket.on('order:update', (data) => { /* update UI */ });
+
+Driver:     socket.emit('driver:subscribe', { driverId: 'DRV-001' });
+Listen:     socket.on('driver:update', (data) => { /* update UI */ });
+
+
+8. ARCHITECTURE
+--------------------------------------------------------------------------------
+Frontend (Next.js) -> API Gateway (NestJS + Socket.io)
+                          |
+                     RabbitMQ (orders_queue)
+                          |
+                     Order Service (Saga Orchestrator)
+                     /    |    \
+              cms_queue wms_queue ros_queue        (canonical JSON)
+                     \    |    /
+                  Legacy Adapters (legacy-cms, npm run start:dev)
+                     /    |    \
+          SOAP/XML HTTP  TCP frames  REST/JSON
+                   |      |      |
+                  CMS    WMS    ROS     Legacy Systems (npm run start:systems)
+                 :8081  :9100  :8082
+
+     Order Service -> notifications_queue -> API Gateway -> Socket.io -> Frontend
+
+
+9. TESTS (legacy-cms)
+--------------------------------------------------------------------------------
+   cd legacy-cms
+   npm test
+
+Covers the SOAP and TCP frame codecs (golden XML / bytes, split and merged TCP
+frames), each adapter against its simulator (timeouts, outages, reconnects,
+idempotent cancels), and the Nest module wiring. No RabbitMQ needed.
+
+
+10. TROUBLESHOOTING
+--------------------------------------------------------------------------------
+- Check Docker containers: docker ps
+- RabbitMQ Management: http://localhost:16000 (guest/guest)
+- MongoDB: mongodb://localhost:27017/swifttrack
+- View logs: docker-compose logs -f
+- Orders fail with CMS_UNAVAILABLE / WMS_UNAVAILABLE / ROS_UNAVAILABLE:
+  the legacy systems aren't running (step 3), or the adapter env vars point
+  at the wrong host/port.
+- Orders fail with ROS_REJECTED:401: ROS_API_KEY differs between the
+  adapters and the systems.
+- EADDRINUSE on 8081 / 9100 / 8082: the legacy-systems container is already
+  running; stop it (docker stop swift-legacy-systems) or change
+  CMS_PORT / WMS_PORT / ROS_PORT.
