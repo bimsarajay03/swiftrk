@@ -15,7 +15,7 @@ Dashed arrows and grey nodes mark parts that are designed but not yet wired in t
 9. [Data model](#9-data-model)
 10. [Frontend structure](#10-frontend-structure)
 11. [Deployment](#11-deployment)
-12. [Target architecture — legacy adapters](#12-target-architecture--legacy-adapters)
+12. [Legacy adapters and protocols](#12-legacy-adapters-and-protocols)
 
 ---
 
@@ -91,11 +91,18 @@ flowchart TB
         omh --> saga
     end
 
-    subgraph legacy["Legacy mocks — one NestJS process, 3 consumers"]
+    subgraph adapters["Legacy adapters — NestJS, 3 RMQ consumers (legacy-mock)"]
         direction LR
-        cms["CMS mock<br/>SOAP stand-in"]
-        wms["WMS mock<br/>TCP stand-in<br/>~10% out of stock"]
-        ros["ROS mock<br/>REST stand-in"]
+        aCms["CmsSoapAdapter<br/>JSON ⇄ SOAP envelope"]
+        aWms["WmsTcpAdapter<br/>JSON ⇄ TCP frames<br/>1 persistent socket"]
+        aRos["RosRestAdapter<br/>JSON ⇄ REST + API key"]
+    end
+
+    subgraph systems["Legacy system simulators (legacy-systems)"]
+        direction LR
+        cms["CMS<br/>SOAP 1.1 :8081"]
+        wms["WMS<br/>framed TCP :9100<br/>qty ≥ 100 or ~10% out of stock"]
+        ros["ROS<br/>REST/JSON :8082"]
     end
 
     subgraph mongo["MongoDB :27017 — db swifttrack"]
@@ -113,9 +120,13 @@ flowchart TB
     qOrders --> omh
     saga <--> cSagas
 
-    saga -- "send + reply" --> qCms --> cms
-    saga -- "send + reply" --> qWms --> wms
-    saga -- "send + reply" --> qRos --> ros
+    saga -- "send + reply" --> qCms --> aCms
+    saga -- "send + reply" --> qWms --> aWms
+    saga -- "send + reply" --> qRos --> aRos
+
+    aCms -- "HTTP POST text/xml" --> cms
+    aWms -- "TCP length-prefixed frames" --> wms
+    aRos -- "HTTP JSON + X-API-Key" --> ros
 
     saga -- "emit order_status_updated<br/>saga_compensation_triggered" --> qNotif
     qNotif --> mh
@@ -141,9 +152,9 @@ flowchart LR
     Q4[["ros_queue<br/>durable"]]
     Q5[["notifications_queue<br/>durable"]]
 
-    CMS["CMS mock"]
-    WMS["WMS mock"]
-    ROS["ROS mock"]
+    CMS["CMS adapter<br/>(noAck: false)"]
+    WMS["WMS adapter<br/>(noAck: false)"]
+    ROS["ROS adapter<br/>(noAck: false)"]
     FUT["future driver / ROS<br/>event producer"]:::future
 
     GW_P -- "order_created" --> Q1
@@ -182,9 +193,10 @@ sequenceDiagram
     participant MQ as RabbitMQ
     participant OS as Order Service
     participant DB2 as MongoDB order_sagas
-    participant CMS as CMS mock
-    participant WMS as WMS mock
-    participant ROS as ROS mock
+    participant AD as Legacy adapters
+    participant CMS as CMS (SOAP)
+    participant WMS as WMS (TCP)
+    participant ROS as ROS (REST)
     actor D as Driver (browser)
 
     C->>GW: POST /orders {customer, items, address}
@@ -198,10 +210,12 @@ sequenceDiagram
     OS->>DB2: insert saga STARTED, orderData snapshot
 
     rect rgb(230, 240, 255)
-    Note over OS,CMS: Step 1 — CMS (30 s timeout)
+    Note over OS,CMS: Step 1 — CMS (30 s saga timeout, 10 s adapter timeout)
     OS->>DB2: sagaState CMS_PENDING
-    OS->>CMS: send cms_create_order (cms_queue)
-    CMS-->>OS: {success, cmsOrderId}
+    OS->>AD: send cms_create_order (cms_queue)
+    AD->>CMS: POST /cms/soap · SOAPAction CreateOrder<br/>CreateOrderRequest envelope
+    CMS-->>AD: CreateOrderResponse · CmsOrderId
+    AD-->>OS: {success, cmsOrderId}
     OS->>DB2: completedSteps += CMS_CREATE_ORDER, CMS_COMPLETED
     OS-)MQ: emit order_status_updated CMS_CONFIRMED
     MQ->>GW: notifications_queue
@@ -210,10 +224,12 @@ sequenceDiagram
     end
 
     rect rgb(230, 250, 235)
-    Note over OS,WMS: Step 2 — WMS (30 s timeout)
+    Note over OS,WMS: Step 2 — WMS (30 s saga timeout, 10 s adapter timeout)
     OS->>DB2: sagaState WMS_PENDING
-    OS->>WMS: send wms_check_stock (wms_queue)
-    WMS-->>OS: {success, inStock true, wmsPackageId}
+    OS->>AD: send wms_check_stock (wms_queue)
+    AD->>WMS: frame CHK·seq·orderId·PROD-001:2
+    WMS-->>AD: frame ACK·seq·OK·WMS-PKG-n
+    AD-->>OS: {success, inStock true, wmsPackageId}
     OS->>DB2: completedSteps += WMS_RESERVE_STOCK, WMS_COMPLETED
     OS-)MQ: emit order_status_updated WMS_CONFIRMED
     MQ->>GW: notifications_queue
@@ -222,10 +238,12 @@ sequenceDiagram
     end
 
     rect rgb(245, 235, 255)
-    Note over OS,ROS: Step 3 — ROS (30 s timeout)
+    Note over OS,ROS: Step 3 — ROS (30 s saga timeout, 10 s adapter timeout)
     OS->>DB2: sagaState ROS_PENDING
-    OS->>ROS: send ros_optimize_route (ros_queue)
-    ROS-->>OS: {success, rosRouteId, ETA, route}
+    OS->>AD: send ros_optimize_route (ros_queue)
+    AD->>ROS: POST /api/v1/routes {reference, origin, destination}
+    ROS-->>AD: 201 {routeId, eta, legs, distanceKm}
+    AD-->>OS: {success, rosRouteId, ETA, route}
     OS->>DB2: completedSteps += ROS_OPTIMIZE_ROUTE, ROS_COMPLETED, COMPLETED
     OS-)MQ: emit order_status_updated ROS_CONFIRMED + ETA + driverId DRV-001
     MQ->>GW: notifications_queue
@@ -252,13 +270,16 @@ sequenceDiagram
     participant MQ as RabbitMQ
     participant OS as Order Service
     participant DB2 as MongoDB order_sagas
-    participant CMS as CMS mock
-    participant WMS as WMS mock
+    participant AD as Legacy adapters
+    participant CMS as CMS (SOAP)
+    participant WMS as WMS (TCP)
 
     Note over OS,CMS: Step 1 succeeded — completedSteps = [CMS_CREATE_ORDER]
 
-    OS->>WMS: send wms_check_stock
-    WMS-->>OS: {success false, inStock false, error OUT_OF_STOCK}
+    OS->>AD: send wms_check_stock
+    AD->>WMS: frame CHK·seq·orderId·PROD-001:100
+    WMS-->>AD: frame NAK·seq·OUT_OF_STOCK·PROD-001
+    AD-->>OS: {success false, inStock false, error OUT_OF_STOCK}
     OS->>DB2: steps += WMS_CHECK_STOCK FAILED
 
     rect rgb(255, 235, 230)
@@ -266,8 +287,10 @@ sequenceDiagram
     OS->>DB2: sagaState COMPENSATING, failureReason
     OS->>DB2: read completedSteps
     Note right of OS: ROS_OPTIMIZE_ROUTE? no<br/>WMS_RESERVE_STOCK? no<br/>CMS_CREATE_ORDER? yes
-    OS->>CMS: send cms_cancel_order {orderId, cmsOrderId}
-    CMS-->>OS: {success true}
+    OS->>AD: send cms_cancel_order {orderId, cmsOrderId}
+    AD->>CMS: POST /cms/soap · SOAPAction CancelOrder
+    CMS-->>AD: CancelOrderResponse · Status CANCELLED
+    AD-->>OS: {success true}
     OS->>DB2: steps += CMS_CANCEL_ORDER (compensated)
     OS->>DB2: sagaState FAILED
     end
@@ -281,7 +304,10 @@ sequenceDiagram
     OS->>MQ: ack order_created
 ```
 
-The same path is taken when any `send()` times out after 30 s or ROS fails. The general rule:
+The same path is taken when a legacy system is unreachable or slow (the adapter returns
+`CMS_UNAVAILABLE`, `WMS_TIMEOUT`, … within 10 s), when any `send()` times out after 30 s, or
+when ROS fails. A cancel or release for something the system no longer holds
+(`CMS_ORDER_NOT_FOUND`, WMS `NOT_FOUND`, ROS 404) counts as success. The general rule:
 
 ```mermaid
 flowchart TD
@@ -552,7 +578,7 @@ flowchart TB
 
 ## 11. Deployment
 
-`docker-compose.yml`: six containers on one bridge network with two named volumes.
+`docker-compose.yml`: seven containers on one bridge network with two named volumes.
 
 ```mermaid
 flowchart TB
@@ -563,7 +589,8 @@ flowchart TB
             client["swift-client<br/>Next.js · node:22-alpine<br/>container :3000"]
             gw["swift-api-gateway<br/>NestJS · node:18-alpine<br/>container :3000"]
             os["swift-order-service<br/>NestJS · no exposed port"]
-            lm["swift-legacy-mock<br/>NestJS · no exposed port"]
+            lm["swift-legacy-mock<br/>legacy adapters · node:20-alpine<br/>no exposed port"]
+            ls["swift-legacy-systems<br/>CMS · WMS · ROS simulators<br/>:8081 · :9100 · :8082"]
             rmq["swift-rabbit<br/>rabbitmq:3-management<br/>:5672 AMQP · :15672 UI<br/>health check"]
             mdb["swift-mongo<br/>mongo:latest<br/>:27017"]
         end
@@ -576,10 +603,12 @@ flowchart TB
     user -. "host :16000 mgmt UI" .-> rmq
     user -. "host :6000 AMQP" .-> rmq
     user -. "host :27017" .-> mdb
+    user -. "host :8081 · :9100 · :8082<br/>curl / wms:probe" .-> ls
 
     gw -- "amqp://rabbitmq:5672" --> rmq
     os -- "amqp://rabbitmq:5672" --> rmq
     lm -- "amqp://rabbitmq:5672" --> rmq
+    lm -- "SOAP legacy-systems:8081<br/>TCP legacy-systems:9100<br/>REST legacy-systems:8082" --> ls
     gw -- "mongodb://mongodb:27017" --> mdb
     os -- "mongodb://mongodb:27017" --> mdb
     rmq --- v1
@@ -588,6 +617,7 @@ flowchart TB
     gw -. "depends_on: healthy" .-> rmq
     os -. "depends_on: healthy" .-> rmq
     lm -. "depends_on: healthy" .-> rmq
+    lm -. "depends_on: started" .-> ls
 ```
 
 | Host port | Container | Purpose |
@@ -597,38 +627,109 @@ flowchart TB
 | 6000 | `swift-rabbit:5672` | AMQP (moved from 5672 to avoid Windows reserved ports) |
 | 16000 | `swift-rabbit:15672` | RabbitMQ management UI |
 | 27017 | `swift-mongo:27017` | MongoDB |
+| 8081 | `swift-legacy-systems:8081` | CMS simulator, SOAP 1.1 (`POST /cms/soap`) |
+| 9100 | `swift-legacy-systems:9100` | WMS simulator, length-prefixed TCP frames |
+| 8082 | `swift-legacy-systems:8082` | ROS simulator, REST/JSON (`/api/v1/routes`) |
 
 ---
 
-## 12. Target architecture — legacy adapters
+## 12. Legacy adapters and protocols
 
-How the mocks are meant to be replaced: each adapter consumes canonical JSON from its queue,
-translates it to the legacy protocol, and translates the reply back. The orchestrator does not
-change.
+Each adapter consumes canonical JSON from its queue, translates it to the legacy system's own
+protocol, calls the system, and translates the reply back. The orchestrator only ever sees the
+canonical JSON. Code: [legacy-cms/src/adapters/](../legacy-cms/src/adapters/) (adapters),
+[legacy-cms/src/protocols/](../legacy-cms/src/protocols/) (codecs),
+[legacy-cms/src/systems/](../legacy-cms/src/systems/) (simulators).
 
 ```mermaid
 flowchart LR
     OS["Order Service<br/>canonical JSON commands"]
 
-    subgraph adapters["Adapter layer (Channel Adapter + Message Translator)"]
-        A1["CMS adapter<br/>JSON ⇄ SOAP envelope"]
-        A2["WMS adapter<br/>JSON ⇄ TCP frames<br/>(Node net socket)"]
-        A3["ROS adapter<br/>JSON ⇄ REST call<br/>+ auth, TLS"]
-    end
-
     Q2[["cms_queue"]]
     Q3[["wms_queue"]]
     Q4[["ros_queue"]]
 
-    CMS[("CMS<br/>on-prem SOAP/XML")]
-    WMS[("WMS<br/>proprietary TCP/IP")]
-    ROS[("ROS<br/>cloud REST/JSON")]
+    subgraph adapters["legacy-mock — Channel Adapter + Message Translator"]
+        A1["CmsSoapAdapter<br/>JSON ⇄ SOAP envelope<br/>Fault → error code"]
+        A2["WmsTcpAdapter<br/>JSON ⇄ TCP frames<br/>replies matched by SEQ"]
+        A3["RosRestAdapter<br/>JSON ⇄ REST call<br/>status → error code"]
+    end
 
-    OS == "send" ==> Q2 ==> A1 -- "HTTP POST text/xml" --> CMS
-    OS == "send" ==> Q3 ==> A2 -- "TCP stream" --> WMS
-    OS == "send" ==> Q4 ==> A3 -- "HTTPS JSON" --> ROS
+    subgraph systems["legacy-systems — simulators, in-memory state"]
+        CMS[("CMS<br/>SOAP 1.1 :8081")]
+        WMS[("WMS<br/>framed TCP :9100")]
+        ROS[("ROS<br/>REST/JSON :8082")]
+    end
+
+    OS == "send" ==> Q2 ==> A1 -- "HTTP POST text/xml<br/>SOAPAction header" --> CMS
+    OS == "send" ==> Q3 ==> A2 -- "TCP stream<br/>u32 length + body" --> WMS
+    OS == "send" ==> Q4 ==> A3 -- "HTTP JSON<br/>X-API-Key" --> ROS
 
     A1 -. "reply" .-> OS
     A2 -. "reply" .-> OS
     A3 -. "reply" .-> OS
+```
+
+| System | Request | Success reply | Failure reply |
+| --- | --- | --- | --- |
+| CMS | `CreateOrderRequest` / `CancelOrderRequest` SOAP envelope | `CreateOrderResponse` with `CmsOrderId` | HTTP 500 `soapenv:Fault` with `<cms:ErrorCode>` |
+| WMS | `CHK`, `RSV`, `REL`, `PNG` frames | `ACK·seq·OK·…` / `PON·seq` | `NAK·seq·OUT_OF_STOCK·sku`, `NOT_FOUND`, `BAD_REQUEST` |
+| ROS | `POST /api/v1/routes`, `DELETE /api/v1/routes/:id` | 201 route JSON / 204 | 400, 401, 404, 5xx |
+
+### WMS frame format
+
+Every message in both directions is a 4-byte big-endian length followed by a UTF-8 body of
+`|`-separated fields (shown as `·` in the diagrams above). Reserved characters inside fields
+are escaped (`|` → `%7C`, `,` → `%2C`, `:` → `%3A`, `%` → `%25`).
+
+```mermaid
+flowchart LR
+    subgraph frame["One frame on the wire"]
+        direction LR
+        L["length<br/>u32 big-endian<br/>4 bytes"] --- B["body (UTF-8)<br/>TYPE · SEQ · field3 · field4 …<br/>e.g. CHK · 7 · ORD-1 · PROD-001:2"]
+    end
+```
+
+### WMS connection lifecycle
+
+One TCP connection, opened on first use and shared by all requests. TCP has no message
+boundaries, so a `FrameDecoder` reassembles frames that arrive split or merged.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant AD as WmsTcpAdapter
+    participant WMS as WMS :9100
+
+    Note over AD: first wms_* command
+    AD->>WMS: TCP connect
+    AD->>WMS: CHK · 1 · ORD-A · …
+    AD->>WMS: CHK · 2 · ORD-B · …
+    WMS-->>AD: ACK · 2 · OK · WMS-PKG-17
+    WMS-->>AD: ACK · 1 · OK · WMS-PKG-42
+    Note over AD: replies matched by SEQ,<br/>not by arrival order
+
+    WMS--xAD: connection lost
+    Note over AD: pending requests fail with WMS_UNAVAILABLE<br/>(not retried: a CHK may already be applied)
+    loop backoff 0.5 s, 1 s, 2 s … max 10 s
+        AD->>WMS: reconnect
+    end
+    AD->>WMS: CHK · 3 · ORD-C · …
+    WMS-->>AD: ACK · 3 · OK · WMS-PKG-9
+```
+
+### Error mapping
+
+Adapters never throw back to the saga. Every problem becomes `{ success: false, error }`, which
+the saga already handles by compensating.
+
+```mermaid
+flowchart LR
+    T1["connection refused /<br/>reset / DNS failure"] --> U["CMS_UNAVAILABLE<br/>WMS_UNAVAILABLE<br/>ROS_UNAVAILABLE"]
+    T2["no reply within 10 s"] --> TO["CMS_TIMEOUT<br/>WMS_TIMEOUT<br/>ROS_TIMEOUT"]
+    T3["SOAP Fault"] --> F["Fault ErrorCode<br/>or CMS_FAULT"]
+    T4["WMS NAK"] --> N["OUT_OF_STOCK<br/>WMS_NOT_FOUND …"]
+    T5["ROS 4xx / 5xx"] --> R["ROS_REJECTED:status<br/>ROS_UNAVAILABLE"]
+    T6["NOT_FOUND on cancel /<br/>release / delete"] --> OK["success: true<br/>nothing to undo"]
+    U & TO & F & N & R --> S["saga: step failed<br/>→ compensate"]
 ```

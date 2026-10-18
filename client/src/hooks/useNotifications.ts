@@ -7,7 +7,6 @@
  * 1. Browser Notification API (push notification)
  * 2. Toast notification in the UI (via react-hot-toast)
  *
- * This is the KEY deliverable for Brian's task:
  * "When the Order Service sees a 'Package Delivered' event in the RabbitMQ
  *  queue, trigger a browser notification on the client's screen instantly."
  *
